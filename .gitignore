@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.env
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+
+# CDK
+cdk.out/
+infra/cdk.out/
+*.js
+*.d.ts
+!jest.config.js
+
+# Node
+node_modules/
+frontend/.next/
+frontend/out/
+frontend/.env.local
+
+# Docker
+*.tar
+
+# AWS
+.aws/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# Misc
+.DS_Store
+*.zip
+*.log
+/tmp/

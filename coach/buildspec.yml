@@ -1,0 +1,104 @@
+# =============================================================================
+# CodeBuild Buildspec — Coach ARM64 Container
+# =============================================================================
+# ✅ ARM64 native (CodeBuild ARM_CONTAINER — no QEMU)
+# ✅ curl -L to download ZIP from GitHub (NOT git clone — auth fails)
+# ✅ GitHub user: AbilashEG  (ONE E — not AbilashEEG)
+# ✅ GitHub repo: football-cup
+# ✅ Unzip folder: football-cup-main/
+# ✅ Base image: python:3.12-slim  (enforced in Dockerfile)
+# ✅ --no-cli-pager on all AWS CLI commands
+# ❌ NEVER use git clone (authentication fails in CodeBuild)
+# ❌ NEVER use AbilashEEG (two E) — ZIP will be 9 bytes
+# =============================================================================
+
+version: 0.2
+
+env:
+  variables:
+    AWS_REGION: "us-east-1"
+    GITHUB_USER: "AbilashEG"
+    GITHUB_REPO: "football-cup"
+    GITHUB_BRANCH: "main"
+    UNZIP_FOLDER: "football-cup-main"
+
+phases:
+
+  pre_build:
+    commands:
+      - echo "=== Pre-build: download source + ECR login ==="
+
+      # Verify GitHub username — catches the common AbilashEEG typo
+      - echo "GitHub: https://github.com/${GITHUB_USER}/${GITHUB_REPO}"
+
+      # Download repo as ZIP (works without auth for public repos)
+      - curl -L -o source.zip
+          "https://github.com/${GITHUB_USER}/${GITHUB_REPO}/archive/refs/heads/${GITHUB_BRANCH}.zip"
+
+      # Verify ZIP is real (not 9 bytes = wrong username)
+      - ZIP_SIZE=$(wc -c < source.zip)
+      - echo "ZIP size = ${ZIP_SIZE} bytes"
+      - |
+        if [ "$ZIP_SIZE" -lt 1000 ]; then
+          echo "ERROR: ZIP too small (${ZIP_SIZE} bytes) — check GitHub username"
+          exit 1
+        fi
+
+      # Unzip
+      - unzip -q source.zip
+      - ls -la
+      - cd ${UNZIP_FOLDER}
+
+      # ECR login
+      - ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text --no-cli-pager)
+      - ECR_REGISTRY="${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+      - IMAGE_TAG=$(date +%Y%m%d-%H%M%S)
+      - echo "Account   = ${ACCOUNT_ID}"
+      - echo "Registry  = ${ECR_REGISTRY}"
+      - echo "Image tag = ${IMAGE_TAG}"
+      - echo "Repo URI  = ${COACH_REPO_URI}"
+
+      - aws ecr get-login-password --region ${AWS_REGION} --no-cli-pager
+          | docker login --username AWS --password-stdin ${ECR_REGISTRY}
+
+  build:
+    commands:
+      - echo "=== Build: ARM64 coach image ==="
+      - cd ${UNZIP_FOLDER}
+
+      # ARM64 native build — no --platform flag needed on ARM_CONTAINER
+      # Build context is repo root so Dockerfile can COPY agents/shared/
+      - docker build
+          --file coach/Dockerfile
+          --tag ${COACH_REPO_URI}:latest
+          --tag ${COACH_REPO_URI}:${IMAGE_TAG}
+          --label "build=${IMAGE_TAG}"
+          --label "commit=${CODEBUILD_RESOLVED_SOURCE_VERSION}"
+          .
+
+      - echo "=== Image built ==="
+      - docker images ${COACH_REPO_URI}:latest
+
+  post_build:
+    commands:
+      - echo "=== Post-build: push to ECR ==="
+      - cd ${UNZIP_FOLDER}
+
+      - docker push ${COACH_REPO_URI}:latest
+      - docker push ${COACH_REPO_URI}:${IMAGE_TAG}
+
+      - echo "Coach image pushed:"
+      - echo "  ${COACH_REPO_URI}:latest"
+      - echo "  ${COACH_REPO_URI}:${IMAGE_TAG}"
+
+      # Store build tag in SSM so deploy script can confirm success
+      - aws ssm put-parameter
+          --name "/football-cup/coach/last_build_tag"
+          --value "${IMAGE_TAG}"
+          --type String
+          --overwrite
+          --region ${AWS_REGION}
+          --no-cli-pager
+
+      - echo "Build tag stored in SSM: /football-cup/coach/last_build_tag = ${IMAGE_TAG}"
+      - echo "=== DONE ==="
