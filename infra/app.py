@@ -1,25 +1,22 @@
 #!/usr/bin/env python3
 """
-CDK App entry point — Football Cup infrastructure.
+CDK App — Football Cup
 
-Architecture:
-  1 AgentCore Runtime  — coach container (ARM64, built by CodeBuild)
-  11 Lambda tools      — 5 player agents + 6 game tools (zip deploy, no Docker)
-  1 AgentCore Gateway  — MCP endpoint (created by deploy-cloudshell.sh)
-  1 Backend Lambda     — FastAPI tick engine (ARM64, built by CloudShell Docker)
-  1 Frontend           — Next.js on Amplify
+DEPLOY ORDER (2 phases):
 
-Stack deploy order:
-  1.  FootballStorageStack    — DynamoDB + S3
-  2.  FootballAgentCoreStack  — 1 ECR repo (coach) + IAM role
-  3.  FootballCodeBuildStack  — CodeBuild project (ARM64 coach image build)
-  4.  FootballMcpToolsStack   — 11 Lambda functions
-  5.  FootballGatewayStack    — SSM manifest for Gateway
-  6.  FootballBackendStack    — FastAPI Lambda + HTTP + WebSocket API
-  7.  FootballFrontendStack   — Next.js on Amplify
+PHASE 1 — Infrastructure only (no Lambda code needed):
+  cdk deploy FootballStorageStack
+  cdk deploy FootballAgentCoreStack     ← creates ECR repos + IAM roles
+  cdk deploy FootballCodeBuildStack     ← creates CodeBuild project
 
-Run all:   cdk deploy --all --require-approval never
-Run one:   cdk deploy FootballStorageStack
+  Then trigger CodeBuild → waits for SUCCEEDED
+  CodeBuild pushes: coach image + 5 player images → ECR
+
+PHASE 2 — After images exist in ECR:
+  cdk deploy FootballMcpToolsStack      ← creates Lambda functions from ECR images
+  cdk deploy FootballGatewayStack       ← SSM manifest
+  cdk deploy FootballBackendStack       ← backend Lambda + API Gateway
+  cdk deploy FootballFrontendStack      ← Amplify (optional)
 """
 
 import aws_cdk as cdk
@@ -33,69 +30,44 @@ from stacks.mcp_tools_stack import McpToolsStack
 from stacks.storage_stack import StorageStack
 
 app = cdk.App()
-
 env = cdk.Environment(
     account=app.node.try_get_context("account") or None,
-    region="us-east-1",   # Nova Micro + AgentCore Runtime available here
+    region="us-east-1",
 )
 
-# ── 1. Storage ────────────────────────────────────────────────────────────────
-storage = StorageStack(
-    app, "FootballStorageStack", env=env,
-    description="Football Cup — DynamoDB tables + S3 events bucket",
-)
+# ── PHASE 1 stacks ────────────────────────────────────────────────────────────
+storage = StorageStack(app, "FootballStorageStack", env=env,
+    description="DynamoDB tables + S3 events bucket")
 
-# ── 2. AgentCore (1 ECR repo + IAM) ──────────────────────────────────────────
-agentcore = AgentCoreStack(
-    app, "FootballAgentCoreStack", env=env,
-    description="Football Cup — coach ECR repo + AgentCore Runtime IAM role",
-)
+agentcore = AgentCoreStack(app, "FootballAgentCoreStack", env=env,
+    description="ECR repos (coach + 5 players) + IAM roles")
 
-# ── 3. CodeBuild (ARM64 coach image — triggered by deploy-cloudshell.sh) ─────
-codebuild_stack = CodeBuildStack(
-    app, "FootballCodeBuildStack",
-    agentcore_stack=agentcore,
-    env=env,
-    description="Football Cup — CodeBuild ARM64 project for coach container only",
-)
+codebuild_stack = CodeBuildStack(app, "FootballCodeBuildStack",
+    agentcore_stack=agentcore, env=env,
+    description="CodeBuild project — builds coach + 5 player ARM64 images")
 codebuild_stack.add_dependency(agentcore)
 
-# ── 4. MCP Tools (11 Lambda functions — 5 players + 6 game tools) ────────────
-mcp_tools = McpToolsStack(
-    app, "FootballMcpToolsStack",
-    storage_stack=storage,
-    env=env,
-    description="Football Cup — 11 Lambda tools: 5 player agents + 6 game tools (ARM64 zip)",
-)
+# ── PHASE 2 stacks (run after CodeBuild pushes images) ───────────────────────
+mcp_tools = McpToolsStack(app, "FootballMcpToolsStack",
+    storage_stack=storage, agentcore_stack=agentcore, env=env,
+    description="11 Lambda tools: 5 player (ECR) + 6 game tools (zip)")
 mcp_tools.add_dependency(storage)
+mcp_tools.add_dependency(agentcore)
 
-# ── 5. Gateway (SSM manifest + endpoint placeholder) ─────────────────────────
-gateway = GatewayStack(
-    app, "FootballGatewayStack",
-    mcp_tools_stack=mcp_tools,
-    env=env,
-    description="Football Cup — AgentCore Gateway SSM config (Gateway created by deploy script)",
-)
+gateway = GatewayStack(app, "FootballGatewayStack",
+    mcp_tools_stack=mcp_tools, env=env,
+    description="AgentCore Gateway SSM config")
 gateway.add_dependency(mcp_tools)
 
-# ── 6. Backend (FastAPI Lambda — backend Docker built in CloudShell) ──────────
-backend = BackendStack(
-    app, "FootballBackendStack",
-    storage_stack=storage,
-    agentcore_stack=agentcore,
-    env=env,
-    description="Football Cup — FastAPI tick engine Lambda + HTTP + WebSocket API",
-)
+backend = BackendStack(app, "FootballBackendStack",
+    storage_stack=storage, agentcore_stack=agentcore, env=env,
+    description="FastAPI backend Lambda + HTTP API + WebSocket API")
 backend.add_dependency(storage)
 backend.add_dependency(agentcore)
 
-# ── 7. Frontend (Next.js on Amplify) ─────────────────────────────────────────
-frontend = FrontendStack(
-    app, "FootballFrontendStack",
-    backend_stack=backend,
-    env=env,
-    description="Football Cup — Next.js 14 on AWS Amplify",
-)
+frontend = FrontendStack(app, "FootballFrontendStack",
+    backend_stack=backend, env=env,
+    description="Next.js on Amplify")
 frontend.add_dependency(backend)
 
 app.synth()

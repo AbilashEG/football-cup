@@ -1,22 +1,14 @@
 """
-MCP Tools Stack — 11 Lambda functions total:
+MCP Tools Stack — Lambda functions using ECR container images.
 
-  5 player agents  (goalkeeper, defender_left, defender_right, midfielder, striker)
-  6 game tools     (get_game_state, get_ball_trajectory, get_nearest_opponent,
-                    evaluate_shot_angle, get_pass_success_rate, log_agent_decision)
+NO Docker bundling in CDK.
+Images are built by CodeBuild and pushed to ECR.
+CDK creates Lambda functions pointing to ECR repos.
 
-All ARM64. Lambda ARNs stored in SSM for GatewayStack and deploy.sh.
-
-Player Lambdas:
-  - Bundled with strands-agents, boto3, pydantic + shared/ schema files
-  - 5s timeout (1s used internally; 4s buffer)
-  - 256 MB memory
-  - PYTHONPATH includes /var/task/shared
-
-Game tool Lambdas:
-  - Unchanged from original McpToolsStack
-  - 10s timeout, 256 MB
-  - Access to DynamoDB + S3
+Deploy order:
+  1. FootballAgentCoreStack  (creates ECR repos + IAM roles)
+  2. CodeBuild trigger       (pushes images to ECR)
+  3. FootballMcpToolsStack   (creates Lambda functions from ECR images)
 """
 
 import aws_cdk as cdk
@@ -24,91 +16,60 @@ from aws_cdk import (
     CfnOutput,
     Duration,
     Stack,
+    aws_ecr as ecr,
     aws_iam as iam,
     aws_lambda as lambda_,
     aws_ssm as ssm,
 )
 from constructs import Construct
 
+
 PLAYER_TOOLS = [
-    # (short_name,      function_name,                    source_dir)
-    ("goalkeeper",      "football-player-goalkeeper",     "../players/goalkeeper"),
-    ("defender_left",   "football-player-defender-left",  "../players/defender_left"),
-    ("defender_right",  "football-player-defender-right", "../players/defender_right"),
-    ("midfielder",      "football-player-midfielder",     "../players/midfielder"),
-    ("striker",         "football-player-striker",        "../players/striker"),
+    # (player_name,    ecr_repo_name,                 function_name,                   ssm_player_key)
+    ("goalkeeper",     "football-player-goalkeeper",  "football-player-goalkeeper",    "goalkeeper"),
+    ("defender_left",  "football-player-defender-left", "football-player-defender-left", "defender-left"),
+    ("defender_right", "football-player-defender-right", "football-player-defender-right", "defender-right"),
+    ("midfielder",     "football-player-midfielder",  "football-player-midfielder",    "midfielder"),
+    ("striker",        "football-player-striker",     "football-player-striker",       "striker"),
 ]
 
 GAME_TOOLS = [
-    # (short_name,            function_name,                          source_dir)
-    ("get_game_state",        "football-tool-get-game-state",        "../mcp_tools/get_game_state"),
-    ("get_ball_trajectory",   "football-tool-get-ball-trajectory",   "../mcp_tools/get_ball_trajectory"),
-    ("get_nearest_opponent",  "football-tool-get-nearest-opponent",  "../mcp_tools/get_nearest_opponent"),
-    ("evaluate_shot_angle",   "football-tool-evaluate-shot-angle",   "../mcp_tools/evaluate_shot_angle"),
-    ("get_pass_success_rate", "football-tool-get-pass-success-rate", "../mcp_tools/get_pass_success_rate"),
-    ("log_agent_decision",    "football-tool-log-agent-decision",    "../mcp_tools/log_agent_decision"),
+    ("get_game_state",        "football-tool-get-game-state"),
+    ("get_ball_trajectory",   "football-tool-get-ball-trajectory"),
+    ("get_nearest_opponent",  "football-tool-get-nearest-opponent"),
+    ("evaluate_shot_angle",   "football-tool-evaluate-shot-angle"),
+    ("get_pass_success_rate", "football-tool-get-pass-success-rate"),
+    ("log_agent_decision",    "football-tool-log-agent-decision"),
 ]
 
 
-def _pascal(snake: str) -> str:
-    """Convert snake_case → PascalCase for CDK logical IDs."""
-    return "".join(word.capitalize() for word in snake.split("_"))
+def _pascal(s: str) -> str:
+    return "".join(w.capitalize() for w in s.replace("-", "_").split("_"))
 
 
 class McpToolsStack(Stack):
-    def __init__(self, scope, id: str, storage_stack, **kwargs):
+    def __init__(self, scope, id: str, storage_stack, agentcore_stack, **kwargs):
         super().__init__(scope, id, **kwargs)
 
-        # Public dict: function_name → ARN  (consumed by GatewayStack)
         self.lambda_arns: dict[str, str] = {}
 
-        # ── IAM: player Lambdas ───────────────────────────────────────────
-        player_policy = iam.ManagedPolicy(
-            self,
-            "PlayerLambdaPolicy",
-            managed_policy_name="football-player-lambda-policy",
-            statements=[
-                iam.PolicyStatement(
-                    sid="BedrockInvoke",
-                    actions=["bedrock:InvokeModel"],
-                    resources=[
-                        "arn:aws:bedrock:us-east-1::foundation-model/amazon.nova-micro-v1:0"
-                    ],
-                ),
-                iam.PolicyStatement(
-                    sid="DynamoDBPlayerAccess",
-                    actions=["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem"],
-                    resources=[storage_stack.game_state_table.table_arn],
-                ),
-            ],
-        )
+        # ── 5 Player Lambda functions (container images from ECR) ─────────
+        for name, ecr_name, function_name, ssm_key in PLAYER_TOOLS:
+            # Reference ECR repo created by AgentCoreStack
+            repo = ecr.Repository.from_repository_name(
+                self, f"PlayerEcrRef{_pascal(name)}",
+                repository_name=ecr_name,
+            )
 
-        player_role = iam.Role(
-            self,
-            "PlayerLambdaRole",
-            role_name="football-player-lambda-role",
-            assumed_by=iam.ServicePrincipal("lambda.amazonaws.com"),
-            managed_policies=[
-                iam.ManagedPolicy.from_aws_managed_policy_name(
-                    "service-role/AWSLambdaBasicExecutionRole"
-                ),
-                player_policy,
-            ],
-        )
-
-        # ── Player Lambdas (5 × ARM64, zip deploy — no bundling) ─────────
-        # Deps are pre-installed by build_lambdas.sh before CDK deploy.
-        # CDK just zips the directory as-is.
-        for name, function_name, source_dir in PLAYER_TOOLS:
-            fn = lambda_.Function(
-                self,
-                f"Player{_pascal(name)}",
+            fn = lambda_.DockerImageFunction(
+                self, f"Player{_pascal(name)}",
                 function_name=function_name,
-                runtime=lambda_.Runtime.PYTHON_3_11,
+                code=lambda_.DockerImageCode.from_ecr(
+                    repository=repo,
+                    tag_or_digest="latest",
+                ),
                 architecture=lambda_.Architecture.ARM_64,
-                handler="handler.handler",
-                code=lambda_.Code.from_asset(source_dir),
-                role=player_role,
+                role=agentcore_stack.player_role,
                 timeout=Duration.seconds(30),
                 memory_size=512,
                 environment={
@@ -120,61 +81,48 @@ class McpToolsStack(Stack):
 
             self.lambda_arns[function_name] = fn.function_arn
 
-            # SSM: store function name for coach env vars
+            # SSM: function name (coach reads this)
             ssm.StringParameter(
-                self,
-                f"PlayerFnName{_pascal(name)}",
-                parameter_name=f"/football-cup/players/{name}/function_name",
+                self, f"PlayerFnName{_pascal(name)}",
+                parameter_name=f"/football-cup/players/{name.replace('_','-')}/function_name",
                 string_value=function_name,
             )
-
-            # SSM: store ARN for GatewayStack
+            # SSM: ARN for Gateway registration
             ssm.StringParameter(
-                self,
-                f"PlayerFnArn{_pascal(name)}",
+                self, f"PlayerFnArn{_pascal(name)}",
                 parameter_name=f"/football-cup/gateway/lambda_arns/{function_name}",
                 string_value=fn.function_arn,
             )
 
             CfnOutput(self, f"Player{_pascal(name)}Arn", value=fn.function_arn)
 
-        # ── IAM: game tool Lambdas ────────────────────────────────────────
+        # ── 6 Game tool Lambda functions (zip deploy — no Docker needed) ──
         game_role = iam.Role(
-            self,
-            "GameToolRole",
+            self, "GameToolRole",
             role_name="football-game-tool-lambda-role",
             assumed_by=iam.ServicePrincipal("lambda.amazonaws.com"),
             managed_policies=[
                 iam.ManagedPolicy.from_aws_managed_policy_name(
                     "service-role/AWSLambdaBasicExecutionRole"
-                )
+                ),
             ],
         )
+        game_role.add_to_policy(iam.PolicyStatement(
+            actions=["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:Query"],
+            resources=[
+                storage_stack.game_state_table.table_arn,
+                f"{storage_stack.game_state_table.table_arn}/index/*",
+            ],
+        ))
+        game_role.add_to_policy(iam.PolicyStatement(
+            actions=["s3:GetObject", "s3:PutObject"],
+            resources=[f"{storage_stack.events_bucket.bucket_arn}/*"],
+        ))
 
-        game_role.add_to_policy(
-            iam.PolicyStatement(
-                sid="DynamoDBGameTools",
-                actions=["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:Query"],
-                resources=[
-                    storage_stack.game_state_table.table_arn,
-                    f"{storage_stack.game_state_table.table_arn}/index/*",
-                ],
-            )
-        )
-
-        game_role.add_to_policy(
-            iam.PolicyStatement(
-                sid="S3GameTools",
-                actions=["s3:GetObject", "s3:PutObject", "s3:HeadObject"],
-                resources=[f"{storage_stack.events_bucket.bucket_arn}/*"],
-            )
-        )
-
-        # ── Game tool Lambdas (6 × ARM64, zip deploy) ─────────────────────
-        for name, function_name, source_dir in GAME_TOOLS:
+        for name, function_name in GAME_TOOLS:
+            source_dir = f"../mcp_tools/{name}"
             fn = lambda_.Function(
-                self,
-                f"Tool{_pascal(name)}",
+                self, f"Tool{_pascal(name)}",
                 function_name=function_name,
                 runtime=lambda_.Runtime.PYTHON_3_11,
                 architecture=lambda_.Architecture.ARM_64,
@@ -187,17 +135,10 @@ class McpToolsStack(Stack):
                     "TABLE_NAME": storage_stack.game_state_table.table_name,
                     "BUCKET_NAME": storage_stack.events_bucket.bucket_name,
                 },
-                description=f"Football MCP game tool: {name}",
             )
-
             self.lambda_arns[function_name] = fn.function_arn
-
-            # SSM: store ARN for GatewayStack
             ssm.StringParameter(
-                self,
-                f"GameToolArn{_pascal(name)}",
+                self, f"GameToolArn{_pascal(name)}",
                 parameter_name=f"/football-cup/gateway/lambda_arns/{function_name}",
                 string_value=fn.function_arn,
             )
-
-            CfnOutput(self, f"Tool{_pascal(name)}Arn", value=fn.function_arn)
