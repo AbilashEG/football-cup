@@ -3,7 +3,7 @@
 #   docker build --platform linux/arm64 -f coach/Dockerfile -t <ecr_uri>:latest .
 # (CodeBuild ARM_CONTAINER builds this natively — no --platform flag needed)
 
-FROM --platform=linux/arm64 python:3.12-slim
+FROM --platform=linux/arm64 public.ecr.aws/docker/library/python:3.12-slim
 
 WORKDIR /app
 
