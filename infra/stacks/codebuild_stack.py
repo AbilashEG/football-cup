@@ -89,6 +89,26 @@ class CodeBuildStack(Stack):
             )
         )
 
+        # ── S3 bucket for source (satisfies CDK source requirement) ─────
+        # Buildspec downloads via curl anyway — bucket just needs to exist.
+        from aws_cdk import aws_s3 as s3
+        source_bucket = s3.Bucket(
+            self,
+            "CoachSourceBucket",
+            bucket_name=f"football-cup-codebuild-src-{self.account}",
+            block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
+            removal_policy=RemovalPolicy.DESTROY,
+            auto_delete_objects=True,
+        )
+        # Give CodeBuild read access to the bucket
+        cb_role.add_to_policy(
+            iam.PolicyStatement(
+                sid="S3SourceRead",
+                actions=["s3:GetObject", "s3:GetObjectVersion", "s3:ListBucket"],
+                resources=[source_bucket.bucket_arn, f"{source_bucket.bucket_arn}/*"],
+            )
+        )
+
         # ── CloudWatch log group ──────────────────────────────────────────
         log_group = logs.LogGroup(
             self,
@@ -99,7 +119,7 @@ class CodeBuildStack(Stack):
         )
 
         # ── Inline buildspec ──────────────────────────────────────────────
-        # Uses NO_SOURCE — curl downloads the ZIP from GitHub.
+        # Source is S3 but buildspec overrides with curl from GitHub.
         # ✅ AbilashEG (one E)
         # ✅ curl -L not git clone
         # ✅ ZIP size check catches wrong-username typo
@@ -179,8 +199,11 @@ class CodeBuildStack(Stack):
             project_name="football-cup-coach-build",
             description="ARM64 coach container build — downloads from AbilashEG/football-cup",
 
-            # ✅ NO_SOURCE — buildspec handles curl download
-            source=codebuild.Source.no_source(),
+            # ✅ S3 source — buildspec downloads from GitHub via curl
+            source=codebuild.Source.s3(
+                bucket=source_bucket,
+                path="",
+            ),
 
             # ✅ ARM64 native environment
             environment=codebuild.BuildEnvironment(
@@ -210,12 +233,18 @@ class CodeBuildStack(Stack):
             role=cb_role,
         )
 
-        # ── SSM: store project name for deploy-cloudshell.sh ─────────────
+        # ── SSM: store project name for deploy script ─────────────────────
         ssm.StringParameter(
             self,
             "CodeBuildProjectName",
             parameter_name="/football-cup/codebuild/coach_project_name",
             string_value=self.coach_build_project.project_name,
+        )
+        ssm.StringParameter(
+            self,
+            "CodeBuildSourceBucket",
+            parameter_name="/football-cup/codebuild/source_bucket",
+            string_value=source_bucket.bucket_name,
         )
 
         # ── Outputs ───────────────────────────────────────────────────────
