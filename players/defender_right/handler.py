@@ -18,7 +18,7 @@ sys.path.append("/var/task/shared")
 from command_schema import AgentCommand, CommandType, Position  # noqa: E402
 from game_state import GameState  # noqa: E402
 from strands import Agent  # noqa: E402
-from strands.models.bedrock import BedrockModel  # noqa: E402
+from strands.models import BedrockModel  # noqa: E402
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)

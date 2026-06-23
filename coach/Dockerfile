@@ -1,38 +1,34 @@
-# ✅ Base image  : python:3.12-slim  (NOT Lambda base image)
-# ✅ Port        : 8080
-# ✅ Entry point : CMD ["python", "agent.py"]
-# ✅ Health check: GET /health returns 200
-# ✅ Architecture: ARM64 (built via CodeBuild ARM_CONTAINER)
-# ❌ NOT public.ecr.aws/lambda/python — NEVER use Lambda base image
-# ❌ NOT CMD ["handler"] Lambda style
-# ❌ NO hardcoded credentials
+# AgentCore Runtime — python:3.12-slim (NOT Lambda base image)
+# Build from repo root:
+#   docker build --platform linux/arm64 -f coach/Dockerfile -t <ecr_uri>:latest .
+# (CodeBuild ARM_CONTAINER builds this natively — no --platform flag needed)
 
-FROM python:3.12-slim
+FROM --platform=linux/arm64 python:3.12-slim
 
 WORKDIR /app
 
-# System deps — curl for health probe, clean up apt cache
 RUN apt-get update \
     && apt-get install -y --no-install-recommends curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy shared Pydantic models (required by agent.py at import time)
-# Build context must be repo root: docker build -f coach/Dockerfile .
-COPY agents/shared /app/shared
+# Copy shared Pydantic models (build context = repo root)
+COPY agents/shared/ /app/shared/
 
-# Install Python dependencies
+# Install deps
 COPY coach/requirements.txt /app/requirements.txt
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install -r requirements.txt --no-cache-dir
 
-# Copy coach agent entry point
+# Copy agent entry point
 COPY coach/agent.py /app/agent.py
 
-# AgentCore Runtime contract: port 8080
+ENV PYTHONPATH=/app:/app/shared
+
+# AgentCore Runtime: port 8080
 EXPOSE 8080
 
-# Health check — AgentCore Runtime startup probe polls /health
+# AgentCore health probe hits /health
 HEALTHCHECK --interval=10s --timeout=3s --start-period=15s \
-  CMD curl -f http://localhost:8080/health || exit 1
+    CMD curl -f http://localhost:8080/health || exit 1
 
-# ✅ CMD uses python directly (NOT Lambda handler style)
+# ✅ python directly — NOT uvicorn, NOT Lambda handler
 CMD ["python", "agent.py"]

@@ -4,5 +4,3 @@ boto3
 requests
 awscrt
 botocore
-amazon-bedrock-agentcore
-pydantic
