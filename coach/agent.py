@@ -27,7 +27,7 @@ import boto3
 from strands import Agent
 from strands.models import BedrockModel                    # ✅ correct import
 from strands.tools.mcp import MCPClient
-from strands.tools.mcp import StreamableHTTPTransport
+from mcp.client.streamable_http import streamablehttp_client
 
 sys.path.insert(0, "/app/shared")
 from command_schema import AgentCommand, CommandType       # noqa: E402
@@ -120,8 +120,8 @@ def run_coach_sync(game_state_json: str) -> dict:
         headers = {"Authorization": f"Bearer {token}"} if token else {}
 
         with MCPClient(
-            StreamableHTTPTransport(
-                url=GATEWAY_URL,
+            lambda: streamablehttp_client(
+                GATEWAY_URL,
                 headers=headers,
             )
         ) as mcp:
