@@ -19,6 +19,7 @@ Game tool Lambdas:
   - Access to DynamoDB + S3
 """
 
+import aws_cdk as cdk
 from aws_cdk import (
     CfnOutput,
     Duration,
@@ -102,20 +103,16 @@ class McpToolsStack(Stack):
                 f"Player{_pascal(name)}",
                 function_name=function_name,
                 runtime=lambda_.Runtime.PYTHON_3_11,
-                architecture=lambda_.Architecture.ARM_64,   # ARM64 — no Docker needed
+                architecture=lambda_.Architecture.ARM_64,
                 handler="handler.handler",
                 code=lambda_.Code.from_asset(
                     source_dir,
-                    bundling=lambda_.BundlingOptions(
+                    bundling=cdk.BundlingOptions(
                         image=lambda_.Runtime.PYTHON_3_11.bundling_image,
-                        platform="linux/arm64",
                         command=[
                             "bash", "-c",
-                            # Install deps into /asset-output
                             "pip install strands-agents boto3 pydantic -t /asset-output --quiet"
-                            # Copy handler
                             " && cp -r . /asset-output"
-                            # Bundle shared schemas alongside handler
                             " && mkdir -p /asset-output/shared"
                             " && cp /asset-input/../../../agents/shared/*.py /asset-output/shared/ 2>/dev/null"
                             " || cp /asset-input/../../agents/shared/*.py /asset-output/shared/",
@@ -123,7 +120,7 @@ class McpToolsStack(Stack):
                     ),
                 ),
                 role=player_role,
-                timeout=Duration.seconds(5),    # 5s total; 1s used by Strands + Bedrock
+                timeout=Duration.seconds(5),
                 memory_size=256,
                 environment={
                     "PYTHONPATH": "/var/task:/var/task/shared",
