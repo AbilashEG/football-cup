@@ -96,7 +96,9 @@ class McpToolsStack(Stack):
             ],
         )
 
-        # ── Player Lambdas (5 × ARM64, zip deploy) ────────────────────────
+        # ── Player Lambdas (5 × ARM64, zip deploy — no bundling) ─────────
+        # Deps are pre-installed by build_lambdas.sh before CDK deploy.
+        # CDK just zips the directory as-is.
         for name, function_name, source_dir in PLAYER_TOOLS:
             fn = lambda_.Function(
                 self,
@@ -105,28 +107,15 @@ class McpToolsStack(Stack):
                 runtime=lambda_.Runtime.PYTHON_3_11,
                 architecture=lambda_.Architecture.ARM_64,
                 handler="handler.handler",
-                code=lambda_.Code.from_asset(
-                    source_dir,
-                    bundling=cdk.BundlingOptions(
-                        image=lambda_.Runtime.PYTHON_3_11.bundling_image,
-                        command=[
-                            "bash", "-c",
-                            "pip install strands-agents boto3 pydantic -t /asset-output --quiet"
-                            " && cp -r . /asset-output"
-                            " && mkdir -p /asset-output/shared"
-                            " && cp /asset-input/../../../agents/shared/*.py /asset-output/shared/ 2>/dev/null"
-                            " || cp /asset-input/../../agents/shared/*.py /asset-output/shared/",
-                        ],
-                    ),
-                ),
+                code=lambda_.Code.from_asset(source_dir),
                 role=player_role,
-                timeout=Duration.seconds(5),
-                memory_size=256,
+                timeout=Duration.seconds(30),
+                memory_size=512,
                 environment={
                     "PYTHONPATH": "/var/task:/var/task/shared",
                     "AWS_REGION_NAME": "us-east-1",
                 },
-                description=f"Football player agent: {name} (Strands + Nova Micro)",
+                description=f"Football player agent: {name}",
             )
 
             self.lambda_arns[function_name] = fn.function_arn
